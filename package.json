@@ -1,0 +1,26 @@
+{
+  "name": "install-stats",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "description": "Daily runs of one-line install scripts: a Cloudflare Worker in front of their short domains",
+  "cloudflare": {
+    "label": "Install Stats",
+    "products": ["Workers", "D1"],
+    "bindings": {
+      "ADMIN_PASSWORD": {
+        "description": "统计页的登录密码，至少 8 位。The password of the stats page, 8+ characters."
+      }
+    }
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260914.1",
+    "typescript": "7.0.2",
+    "wrangler": "4.131.2"
+  }
+}
