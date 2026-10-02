@@ -12,42 +12,17 @@
       "migrations_dir": "migrations"
     }
   ],
-  // The short domains of the install scripts. Each answers with a redirect to
-  // its script (TARGETS below), as the redirect rules they replace did, and is
-  // counted on the way. Cloudflare runs a zone's redirect rules before its
-  // Workers: delete the rule of each hostname here once this is deployed.
-  "routes": [
-    { "pattern": "install.jinqians.com/*", "zone_name": "jinqians.com" },
-    { "pattern": "snell.jinqians.com/*", "zone_name": "jinqians.com" },
-    { "pattern": "snell-centos.jinqians.com/*", "zone_name": "jinqians.com" },
-    { "pattern": "snell-docker.jinqians.com/*", "zone_name": "jinqians.com" },
-    { "pattern": "snell-alpine.jinqians.com/*", "zone_name": "jinqians.com" },
-    { "pattern": "menu.jinqians.com/*", "zone_name": "jinqians.com" },
-    { "pattern": "ss.jinqians.com/*", "zone_name": "jinqians.com" },
-    { "pattern": "psm.jinqians.com/*", "zone_name": "jinqians.com" },
-    // the stats page (any hostname that is not in TARGETS shows it)
-    { "pattern": "stats.jinqians.com", "custom_domain": true }
-  ],
-  "vars": {
-    // hostname → the script it serves
-    "TARGETS": {
-      "install.jinqians.com": "https://raw.githubusercontent.com/jinqians/snell.sh/refs/heads/main/install.sh",
-      "snell.jinqians.com": "https://raw.githubusercontent.com/jinqians/snell.sh/main/snell.sh",
-      "snell-centos.jinqians.com": "https://raw.githubusercontent.com/jinqians/snell.sh/refs/heads/main/snell-centos.sh",
-      "snell-docker.jinqians.com": "https://raw.githubusercontent.com/jinqians/snell.sh/refs/heads/main/snell-docker.sh",
-      "snell-alpine.jinqians.com": "https://raw.githubusercontent.com/jinqians/snell.sh/refs/heads/main/snell-alpine.sh",
-      "menu.jinqians.com": "https://raw.githubusercontent.com/jinqians/snell.sh/main/menu.sh",
-      "ss.jinqians.com": "https://raw.githubusercontent.com/jinqians/ss-2022.sh/refs/heads/main/ss-2022.sh",
-      "psm.jinqians.com": "https://raw.githubusercontent.com/jinqians/proxy-stack/main/bootstrap.sh"
-    },
-    // Docker Hub repositories whose pulls are recorded once a day
-    "DOCKER_REPOS": ["jinqians/snell-server"],
-    // what a "day" is
-    "TIMEZONE": "Asia/Shanghai"
-  },
-  // 00:05 in China: the day before is closed (its unique servers counted,
-  // the hashes behind them deleted) and Docker Hub's pull counts are read.
-  "triggers": { "crons": ["5 16 * * *"] },
+  // What is counted (the scripts, Docker Hub repositories, the time zone) is
+  // set on the stats page, not here, so this file is the same for everyone.
+  // The stats page answers on the workers.dev address. A custom domain for it,
+  // and a route for each script hostname of its own, are added in the
+  // Cloudflare dashboard (the Worker → Settings → Domains & Routes); a deploy
+  // leaves them alone, as no routes are listed here.
+  "workers_dev": true,
+  // Every hour, so that a day ends on time in any time zone: the days before
+  // today are closed (their unique servers counted, the hashes behind them
+  // deleted), and Docker Hub's pull counts are read once a day.
+  "triggers": { "crons": ["7 * * * *"] },
   "observability": { "enabled": true }
   // Secret (never in this file): ADMIN_PASSWORD, the stats page's password
 }

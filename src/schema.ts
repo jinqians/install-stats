@@ -2,9 +2,11 @@
 // applies whatever file in migrations/ is not applied yet (each in one batch,
 // so all or nothing). Files applied with `wrangler d1 migrations apply` count.
 import m0001 from '../migrations/0001_init.sql'
+import m0002 from '../migrations/0002_scripts.sql'
 
 const MIGRATIONS: [name: string, sql: string][] = [
   ['0001_init.sql', m0001],
+  ['0002_scripts.sql', m0002],
 ]
 
 let ready: Promise<void> | null = null

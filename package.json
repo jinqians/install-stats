@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "license": "AGPL-3.0-only",
-  "description": "Daily runs of one-line install scripts: a Cloudflare Worker in front of their short domains",
+  "description": "Daily runs of one-line install scripts, for any project: a Cloudflare Worker that redirects to the scripts and counts the runs",
   "cloudflare": {
     "label": "Install Stats",
     "products": ["Workers", "D1"],

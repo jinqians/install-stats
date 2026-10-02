@@ -1,82 +1,153 @@
-// Install stats: a Worker in front of the short domains of one-line install
-// scripts (`bash <(curl -sL snell.jinqians.com)`). Each request is answered,
-// as the redirect rules it replaces did, with a redirect to the script on
-// GitHub; on the way, a run is counted for its day, script, country and client.
-// Any other hostname shows the stats page (password: the ADMIN_PASSWORD secret).
+// Install stats: the daily runs of one-line install scripts
+// (`bash <(curl -sL https://example.com/tool)`), for any project. A script has
+// a name and the URL it is served from; a request for it is answered with a
+// redirect to that URL, and on the way a run is counted for its day, country
+// and client. A script is reached two ways:
+//   - at https://<this Worker's host>/<name>: a link to hand out, or the
+//     target of an existing short domain's redirect rule (no route needed);
+//   - on a hostname of its own, which a Worker route sends here.
+// What is counted (the scripts, Docker Hub repositories, the time zone a day
+// is counted in) is set on the stats page, behind the ADMIN_PASSWORD secret,
+// and kept in D1.
 //
-// What a run is: a GET of "/" by curl or wget, the way the scripts are run —
-// browsers and crawlers are counted apart. Unique servers per day come from a
-// hash of the address with a salt that changes every day and is deleted at its
-// end, together with the hashes: no address is kept, nor anything that could
-// be matched to one later.
+// What a run is: a GET of the script by curl or wget, the way the scripts are
+// run — browsers and crawlers are counted apart. Unique servers per day come
+// from a hash of the address with a salt that changes every day and is deleted
+// at its end, together with the hashes: no address is kept, nor anything that
+// could be matched to one later.
 //
-// Scripts belong to projects: the GitHub repository each is served from
-// (install, snell, menu … are all snell.sh). The public badges give a
-// project's runs as one number; the details are for the stats page.
+// Scripts belong to projects: the one named, or else the GitHub repository
+// each is served from. The public badges give a project's runs as one number;
+// the details are for the stats page.
 import { ensureSchema } from './schema'
 import { APP_CSS, APP_JS, PAGE_HTML } from './page'
 
 export type Env = {
   DB: D1Database
   ADMIN_PASSWORD?: string
-  /**
-   * hostname → the script's URL, or { url, project } to name its project
-   * (otherwise the GitHub repository it is served from)
-   */
-  TARGETS?: Record<string, Target> | string
-  /** Docker Hub repositories ("owner/name") whose pulls are recorded daily */
-  DOCKER_REPOS?: string[] | string
-  /** what a day is: an IANA time zone (default Asia/Shanghai) */
-  TIMEZONE?: string
 }
 
-type Target = string | { url?: unknown; project?: unknown }
+type Script = { name: string; url: string; project: string; hosts: string[] }
+type Config = { scripts: Script[]; timezone: string; dockerRepos: string[] }
 
 const SESSION_DAYS = 30
 const MAX_DAYS = 365
+const MAX_SCRIPTS = 200
+const MAX_REPOS = 20
+// how long an isolate trusts the configuration it read (a change made on the
+// stats page is seen by the isolate that made it at once, by others after this)
+const CONFIG_TTL_MS = 30_000
+// the stats page's own paths: no script is named so
+const RESERVED = new Set(['api', 'badge', 'app.js', 'app.css', 'favicon.ico', 'robots.txt'])
+const NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/
+const HOST = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
+const PROJECT = /^[\w.-]{1,64}$/
+const REPO = /^[\w.-]{1,64}\/[\w.-]{1,64}$/
 
-// ── configuration ────────────────────────────────────────────────────────────
-function parsed<T>(v: T | string | undefined, fallback: T): T {
-  if (v === undefined || v === '') return fallback
-  if (typeof v !== 'string') return v
-  try { return JSON.parse(v) as T } catch { return fallback }
-}
+// ── configuration (D1) ───────────────────────────────────────────────────────
+let cfgCache: { at: number; cfg: Config } | null = null
 
-/** TARGETS, checked: hostname → its script's https URL and its project */
-function scripts(env: Env): Map<string, { url: string; project: string }> {
-  const out = new Map<string, { url: string; project: string }>()
-  for (const [h, t] of Object.entries(parsed<Record<string, Target>>(env.TARGETS, {}))) {
-    const url = typeof t === 'string' ? t : String(t?.url ?? '')
-    if (!/^https:\/\//.test(url)) continue
-    // a project named, or the GitHub repository it is served from, or its own hostname
-    const named = typeof t === 'object' && typeof t?.project === 'string' && /^[\w.-]{1,64}$/.test(t.project) ? t.project : ''
-    const repo = /^https:\/\/raw\.githubusercontent\.com\/[^/]+\/([^/]+)\//.exec(url)?.[1] ?? ''
-    out.set(h.toLowerCase(), { url, project: named || repo || h.toLowerCase() })
+/** the configuration; fresh: read it now, whatever this isolate read before */
+async function config(env: Env, fresh = false): Promise<Config> {
+  if (!fresh && cfgCache && Date.now() - cfgCache.at < CONFIG_TTL_MS) return cfgCache.cfg
+  try {
+    await ensureSchema(env.DB)
+    const [rows, settings] = (await env.DB.batch([
+      env.DB.prepare('SELECT name, url, project, hosts FROM scripts ORDER BY pos, name'),
+      env.DB.prepare('SELECT key, value FROM settings'),
+    ])).map((r) => r.results as Record<string, string>[])
+    const s = Object.fromEntries(settings.map((r) => [r.key, r.value]))
+    const cfg: Config = {
+      scripts: rows.map((r) => ({ name: r.name, url: r.url, project: r.project, hosts: r.hosts ? r.hosts.split(' ') : [] })),
+      timezone: s.timezone || 'UTC',
+      dockerRepos: s.docker_repos ? s.docker_repos.split(' ') : [],
+    }
+    cfgCache = { at: Date.now(), cfg }
+    return cfg
+  } catch (e) {
+    // D1 not answering: the scripts keep being served from what was read last
+    if (cfgCache) return cfgCache.cfg
+    throw e
   }
-  return out
 }
 
-const targets = (env: Env) => new Map([...scripts(env)].map(([h, s]) => [h, s.url]))
+const validZone = (tz: string) => { try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true } catch { return false } }
 
-/** project → its hostnames, in TARGETS order */
-function projects(env: Env): Map<string, string[]> {
+type Problem = { error: 'invalid'; field: string; value?: string }
+
+/** a configuration posted from the stats page (or imported), checked; statsHost is the page's own */
+function checked(body: unknown, statsHost: string): { cfg: Config } | { problem: Problem } {
+  const b = (body ?? {}) as Record<string, unknown>
+  const bad = (field: string, value?: unknown) => ({ problem: { error: 'invalid' as const, field, value: value === undefined ? undefined : String(value).slice(0, 200) } })
+  if (!Array.isArray(b.scripts)) return bad('scripts')
+  if (b.scripts.length > MAX_SCRIPTS) return bad('too_many_scripts', b.scripts.length)
+  const scripts: Script[] = [], names = new Set<string>(), hosts = new Set<string>()
+  for (const raw of b.scripts as Record<string, unknown>[]) {
+    const name = String(raw?.name ?? '').trim().toLowerCase()
+    if (!NAME.test(name)) return bad('name', name)
+    if (RESERVED.has(name)) return bad('reserved', name)
+    if (names.has(name)) return bad('duplicate_name', name)
+    names.add(name)
+    const url = String(raw?.url ?? '').trim()
+    let ok = url.length <= 2048
+    try { ok &&= new URL(url).protocol === 'https:' } catch { ok = false }
+    if (!ok) return bad('url', url)
+    const project = String(raw?.project ?? '').trim()
+    if (project && !PROJECT.test(project)) return bad('project', project)
+    const list = (Array.isArray(raw?.hosts) ? raw.hosts : String(raw?.hosts ?? '').split(/[\s,]+/))
+      .map((h) => String(h).trim().toLowerCase().replace(/\.$/, '')).filter(Boolean)
+    for (const h of list) {
+      if (!HOST.test(h)) return bad('host', h)
+      if (h === statsHost) return bad('stats_host', h)
+      if (hosts.has(h)) return bad('duplicate_host', h)
+      hosts.add(h)
+    }
+    scripts.push({ name, url, project, hosts: list })
+  }
+  const timezone = String(b.timezone ?? 'UTC').trim()
+  if (!validZone(timezone)) return bad('timezone', timezone)
+  const repos = (Array.isArray(b.dockerRepos) ? b.dockerRepos : String(b.dockerRepos ?? '').split(/[\s,]+/))
+    .map((r) => String(r).trim()).filter(Boolean)
+  if (repos.length > MAX_REPOS) return bad('too_many_repos', repos.length)
+  for (const r of repos) if (!REPO.test(r)) return bad('repo', r)
+  return { cfg: { scripts, timezone, dockerRepos: [...new Set(repos)] } }
+}
+
+async function saveConfig(env: Env, cfg: Config) {
+  await ensureSchema(env.DB)
+  const setting = (key: string, value: string) => env.DB.prepare(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value').bind(key, value)
+  // one batch: all of it or none
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM scripts'),
+    ...cfg.scripts.map((s, i) => env.DB.prepare('INSERT INTO scripts (name, url, project, hosts, pos) VALUES (?, ?, ?, ?, ?)')
+      .bind(s.name, s.url, s.project, s.hosts.join(' '), i)),
+    setting('timezone', cfg.timezone),
+    setting('docker_repos', cfg.dockerRepos.join(' ')),
+  ])
+  cfgCache = { at: Date.now(), cfg }
+}
+
+/** a script's project: the one named, or the GitHub repository it is served from, or its own name */
+const projectOf = (s: Script) => s.project || /^https:\/\/raw\.githubusercontent\.com\/[^/]+\/([^/]+)\//.exec(s.url)?.[1] || s.name
+
+/** project → its scripts' names, in the order of the scripts */
+function projects(cfg: Config): Map<string, string[]> {
   const out = new Map<string, string[]>()
-  for (const [h, { project }] of scripts(env)) out.set(project, [...(out.get(project) ?? []), h])
+  for (const s of cfg.scripts) out.set(projectOf(s), [...(out.get(projectOf(s)) ?? []), s.name])
   return out
 }
 
-/** a project by its repository's name, with or without ".sh" (snell → snell.sh) */
-const projectNamed = (env: Env, name: string) => [...projects(env).keys()].find((k) => k === name || k.replace(/\.sh$/, '') === name)
+/** a project by its name, with or without ".sh" (snell → snell.sh) */
+const projectNamed = (cfg: Config, name: string) => [...projects(cfg).keys()].find((k) => k === name || k.replace(/\.sh$/, '') === name)
 
 /** "?, ?, ?" for an IN list of n */
 const marks = (n: number) => Array(n).fill('?').join(', ')
 
-const repos = (env: Env) => parsed<string[]>(env.DOCKER_REPOS, []).filter((r) => /^[\w.-]+\/[\w.-]+$/.test(r))
-
-/** The date (YYYY-MM-DD) in TIMEZONE. */
-function dayOf(env: Env, at = new Date()): string {
+/** The date (YYYY-MM-DD) in the configured time zone. */
+function dayOf(cfg: Config, at = new Date()): string {
   try {
-    return new Intl.DateTimeFormat('en-CA', { timeZone: env.TIMEZONE || 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(at)
+    return new Intl.DateTimeFormat('en-CA', { timeZone: cfg.timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(at)
   } catch {
     return at.toISOString().slice(0, 10)
   }
@@ -114,34 +185,30 @@ async function saltFor(env: Env, day: string): Promise<string> {
   return row!.salt
 }
 
-async function count(req: Request, env: Env, host: string) {
-  await ensureSchema(env.DB)
-  const day = dayOf(env)
+async function count(req: Request, env: Env, cfg: Config, script: string) {
+  const day = dayOf(cfg)
   const agent = agentOf(req.headers.get('User-Agent') ?? '')
   const cf = (req as Request & { cf?: { country?: unknown } }).cf
   const country = typeof cf?.country === 'string' ? cf.country.slice(0, 2).toUpperCase() : ''
   const stmts = [
-    env.DB.prepare(`INSERT INTO hits (day, host, country, agent, n) VALUES (?, ?, ?, ?, 1)
-                    ON CONFLICT (day, host, country, agent) DO UPDATE SET n = n + 1`).bind(day, host, country, agent),
+    env.DB.prepare(`INSERT INTO hits (day, script, country, agent, n) VALUES (?, ?, ?, ?, 1)
+                    ON CONFLICT (day, script, country, agent) DO UPDATE SET n = n + 1`).bind(day, script, country, agent),
   ]
   const ip = req.headers.get('CF-Connecting-IP')
   if (agent !== 'other' && ip) {
     const h = (await sha256Hex(`${await saltFor(env, day)}|${ip}`)).slice(0, 20)
-    stmts.push(env.DB.prepare('INSERT OR IGNORE INTO seen (day, host, h) VALUES (?, ?, ?)').bind(day, host, h))
+    stmts.push(env.DB.prepare('INSERT OR IGNORE INTO seen (day, script, h) VALUES (?, ?, ?)').bind(day, script, h))
   }
   await env.DB.batch(stmts)
 }
 
-/** A script's hostname: off to the script, counted after the answer is sent. */
-function serveScript(req: Request, env: Env, ctx: ExecutionContext, host: string, target: string): Response {
-  const path = new URL(req.url).pathname
-  // the script is "/"; anything else (a favicon, a crawler's guess) goes to it
-  // as well, uncounted
-  if (req.method === 'GET' && path === '/') ctx.waitUntil(count(req, env, host).catch((e) => console.error('count', host, e)))
-  return new Response(null, { status: 302, headers: { Location: target, 'Cache-Control': 'no-store' } })
+/** Off to the script, counted (when it is a run) after the answer is sent. */
+function serveScript(req: Request, env: Env, ctx: ExecutionContext, cfg: Config, s: Script, counted: boolean): Response {
+  if (counted && req.method === 'GET') ctx.waitUntil(count(req, env, cfg, s.name).catch((e) => console.error('count', s.name, e)))
+  return new Response(null, { status: 302, headers: { Location: s.url, 'Cache-Control': 'no-store' } })
 }
 
-// ── the daily job ────────────────────────────────────────────────────────────
+// ── the hourly job ───────────────────────────────────────────────────────────
 async function hubPulls(repo: string): Promise<number | null> {
   try {
     const r = await fetch(`https://hub.docker.com/v2/repositories/${repo}/`, {
@@ -156,24 +223,30 @@ async function hubPulls(repo: string): Promise<number | null> {
   }
 }
 
-/** The day before closed (its unique servers counted, their hashes and salt deleted); Docker Hub read. */
-async function daily(env: Env) {
-  await ensureSchema(env.DB)
-  const today = dayOf(env)
+/**
+ * Every hour, so that a day ends on time in any time zone: the days before
+ * today are closed (their unique servers counted, their hashes and salt
+ * deleted), and Docker Hub is read once a day, at the day's first run (a day's
+ * pulls are the growth from its reading to the next day's).
+ */
+async function hourly(env: Env) {
+  const cfg = await config(env, true)
+  const today = dayOf(cfg)
   await env.DB.batch([
-    env.DB.prepare(`INSERT OR REPLACE INTO uniques (day, host, n) SELECT day, host, COUNT(*) FROM seen WHERE day < ? GROUP BY day, host`).bind(today),
+    env.DB.prepare(`INSERT OR REPLACE INTO uniques (day, script, n) SELECT day, script, COUNT(*) FROM seen WHERE day < ? GROUP BY day, script`).bind(today),
     // and over every script ("*"): the day's salt is one, so a server that ran two has one hash
-    env.DB.prepare(`INSERT OR REPLACE INTO uniques (day, host, n) SELECT day, '*', COUNT(DISTINCT h) FROM seen WHERE day < ? GROUP BY day`).bind(today),
+    env.DB.prepare(`INSERT OR REPLACE INTO uniques (day, script, n) SELECT day, '*', COUNT(DISTINCT h) FROM seen WHERE day < ? GROUP BY day`).bind(today),
     // and over each project's scripts ("@snell.sh")
-    ...[...projects(env)].map(([key, hosts]) => env.DB.prepare(
-      `INSERT OR REPLACE INTO uniques (day, host, n) SELECT day, ?, COUNT(DISTINCT h) FROM seen WHERE day < ? AND host IN (${marks(hosts.length)}) GROUP BY day`)
-      .bind(`@${key}`, today, ...hosts)),
+    ...[...projects(cfg)].map(([key, names]) => env.DB.prepare(
+      `INSERT OR REPLACE INTO uniques (day, script, n) SELECT day, ?, COUNT(DISTINCT h) FROM seen WHERE day < ? AND script IN (${marks(names.length)}) GROUP BY day`)
+      .bind(`@${key}`, today, ...names)),
     env.DB.prepare('DELETE FROM seen WHERE day < ?').bind(today),
     env.DB.prepare('DELETE FROM salts WHERE day < ?').bind(today),
   ])
-  for (const repo of repos(env)) {
+  for (const repo of cfg.dockerRepos) {
+    if (await env.DB.prepare('SELECT 1 FROM pulls WHERE day = ? AND repo = ?').bind(today, repo).first()) continue
     const total = await hubPulls(repo)
-    if (total !== null) await env.DB.prepare('INSERT OR REPLACE INTO pulls (day, repo, total) VALUES (?, ?, ?)').bind(today, repo, total).run()
+    if (total !== null) await env.DB.prepare('INSERT OR IGNORE INTO pulls (day, repo, total) VALUES (?, ?, ?)').bind(today, repo, total).run()
     else console.error('docker hub', repo, 'unreadable')
   }
 }
@@ -211,12 +284,13 @@ const SECURITY_HEADERS = {
   'Referrer-Policy': 'no-referrer',
   'X-Frame-Options': 'DENY',
 }
+// errors are codes; the page says them in its language
 const json = (v: unknown, status = 200, extra: Record<string, string> = {}) =>
   new Response(JSON.stringify(v), { status, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...SECURITY_HEADERS, ...extra } })
 
 /**
  * The hostname asked for. On Cloudflare it is the URL's; `wrangler dev`
- * rewrites every URL to the first route's host, but keeps the Host header.
+ * rewrites every URL to its own address, but keeps the Host header.
  */
 const hostOf = (req: Request) => (req.headers.get('Host') ?? new URL(req.url).host).replace(/:\d+$/, '').toLowerCase()
 
@@ -230,12 +304,12 @@ function sameOrigin(req: Request): boolean {
 }
 
 async function login(req: Request, env: Env): Promise<Response> {
-  if (!configured(env)) return json({ error: '先设置 ADMIN_PASSWORD（至少 8 位）' }, 503)
+  if (!configured(env)) return json({ error: 'no_password' }, 503)
   if (!sameOrigin(req)) return json({ error: 'forbidden' }, 403)
   const body = await req.json<{ password?: unknown }>().catch(() => ({ password: '' }))
   if (!(await same(String(body.password ?? ''), env.ADMIN_PASSWORD!))) {
     await new Promise((r) => setTimeout(r, 1000))   // guessing costs a second a try
-    return json({ error: '密码不对' }, 401)
+    return json({ error: 'wrong_password' }, 401)
   }
   const exp = Math.floor(Date.now() / 1000) + SESSION_DAYS * 86400
   return json({ ok: true }, 200, {
@@ -246,56 +320,56 @@ async function login(req: Request, env: Env): Promise<Response> {
 // ── the stats ────────────────────────────────────────────────────────────────
 type Row = Record<string, string | number | null>
 
-async function stats(env: Env, days: number) {
+async function stats(env: Env, cfg: Config, days: number) {
   await ensureSchema(env.DB)
-  const today = dayOf(env)
+  const today = dayOf(cfg)
   const from = addDays(today, -(days - 1))
   const list = Array.from({ length: days }, (_, i) => addDays(from, i))
-  const proj = [...projects(env)]
+  const proj = [...projects(cfg)]
   const [hits, uniq, countries, agents, totals, pulls, ...projLive] = (await env.DB.batch([
-    env.DB.prepare(`SELECT day, host, CASE WHEN agent = 'other' THEN 'other' ELSE 'runs' END AS kind, SUM(n) AS n
-                      FROM hits WHERE day >= ? GROUP BY day, host, kind`).bind(from),
-    env.DB.prepare(`SELECT day, host, n FROM uniques WHERE day >= ?
-                    UNION ALL SELECT day, host, COUNT(*) FROM seen WHERE day >= ? GROUP BY day, host
+    env.DB.prepare(`SELECT day, script, CASE WHEN agent = 'other' THEN 'other' ELSE 'runs' END AS kind, SUM(n) AS n
+                      FROM hits WHERE day >= ? GROUP BY day, script, kind`).bind(from),
+    env.DB.prepare(`SELECT day, script, n FROM uniques WHERE day >= ?
+                    UNION ALL SELECT day, script, COUNT(*) FROM seen WHERE day >= ? GROUP BY day, script
                     UNION ALL SELECT day, '*', COUNT(DISTINCT h) FROM seen WHERE day >= ? GROUP BY day`).bind(from, from, from),
     env.DB.prepare(`SELECT country, SUM(n) AS n FROM hits WHERE day >= ? AND agent != 'other' GROUP BY country ORDER BY n DESC LIMIT 20`).bind(from),
     env.DB.prepare(`SELECT agent, SUM(n) AS n FROM hits WHERE day >= ? GROUP BY agent`).bind(from),
-    env.DB.prepare(`SELECT host, SUM(n) AS n, MIN(day) AS since FROM hits WHERE agent != 'other' GROUP BY host`),
+    env.DB.prepare(`SELECT script, SUM(n) AS n, MIN(day) AS since FROM hits WHERE agent != 'other' GROUP BY script`),
     // the reading before the first day too: the first day's growth needs it
     env.DB.prepare('SELECT day, repo, total FROM pulls WHERE day >= ? ORDER BY day').bind(addDays(from, -1)),
     // each project's servers today (and any day not closed yet), each once
-    ...proj.map(([key, hosts]) => env.DB.prepare(
-      `SELECT day, ? AS host, COUNT(DISTINCT h) AS n FROM seen WHERE day >= ? AND host IN (${marks(hosts.length)}) GROUP BY day`)
-      .bind(`@${key}`, from, ...hosts)),
+    ...proj.map(([key, names]) => env.DB.prepare(
+      `SELECT day, ? AS script, COUNT(DISTINCT h) AS n FROM seen WHERE day >= ? AND script IN (${marks(names.length)}) GROUP BY day`)
+      .bind(`@${key}`, from, ...names)),
   ])).map((r) => r.results as Row[])
 
-  // every script in TARGETS, then any that has runs but was taken out of it
-  const t = targets(env)
-  const hosts = [...t.keys(), ...[...new Set(totals.map((r) => String(r.host)))].filter((h) => !t.has(h)).sort()]
+  // every script configured, then any that has runs but was taken out
+  const byName = new Map(cfg.scripts.map((s) => [s.name, s]))
+  const names = [...byName.keys(), ...[...new Set(totals.map((r) => String(r.script)))].filter((n) => !byName.has(n)).sort()]
   const index = new Map(list.map((d, i) => [d, i]))
   const zeros = () => list.map(() => 0)
   const runs: Record<string, number[]> = {}, other: Record<string, number[]> = {}, unique: Record<string, number[]> = {}
-  for (const h of hosts) { runs[h] = zeros(); other[h] = zeros(); unique[h] = zeros() }
+  for (const n of names) { runs[n] = zeros(); other[n] = zeros(); unique[n] = zeros() }
   for (const r of hits) {
-    const i = index.get(String(r.day)), h = String(r.host)
-    if (i === undefined || !runs[h]) continue
-    ;(r.kind === 'other' ? other : runs)[h][i] += Number(r.n)
+    const i = index.get(String(r.day)), n = String(r.script)
+    if (i === undefined || !runs[n]) continue
+    ;(r.kind === 'other' ? other : runs)[n][i] += Number(r.n)
   }
   // servers over every script ("*") and over each project's ("@name"), each once
   const uniqueAll = zeros()
   const projUnique: Record<string, number[]> = Object.fromEntries(proj.map(([key]) => [key, zeros()]))
   for (const r of [...uniq, ...projLive.flat()]) {
-    const i = index.get(String(r.day)), h = String(r.host)
+    const i = index.get(String(r.day)), n = String(r.script)
     if (i === undefined) continue
-    if (h === '*') uniqueAll[i] += Number(r.n)
-    else if (h.startsWith('@')) { if (projUnique[h.slice(1)]) projUnique[h.slice(1)][i] += Number(r.n) }
-    else if (unique[h]) unique[h][i] += Number(r.n)
+    if (n === '*') uniqueAll[i] += Number(r.n)
+    else if (n.startsWith('@')) { if (projUnique[n.slice(1)]) projUnique[n.slice(1)][i] += Number(r.n) }
+    else if (unique[n]) unique[n][i] += Number(r.n)
   }
 
   // pulls on a day: the next day's reading minus its own; today's, the live
   // count minus this morning's reading (best effort)
   const pullRows: { repo: string; total: number | null; days: (number | null)[] }[] = []
-  for (const repo of repos(env)) {
+  for (const repo of cfg.dockerRepos) {
     const snap = new Map(pulls.filter((p) => p.repo === repo).map((p) => [String(p.day), Number(p.total)]))
     const live = await hubPulls(repo)
     const at = (d: string) => (d === addDays(today, 1) ? live ?? undefined : snap.get(d))
@@ -307,11 +381,11 @@ async function stats(env: Env, days: number) {
   }
 
   return {
-    timezone: env.TIMEZONE || 'Asia/Shanghai', today, days: list,
-    hosts: hosts.map((h) => ({ host: h, target: t.get(h) ?? null })),
-    projects: proj.map(([name, hs]) => ({ name, hosts: hs, unique: projUnique[name] })),
+    timezone: cfg.timezone, today, days: list,
+    scripts: names.map((n) => ({ name: n, url: byName.get(n)?.url ?? null, hosts: byName.get(n)?.hosts ?? [] })),
+    projects: proj.map(([name, ns]) => ({ name, scripts: ns, unique: projUnique[name] })),
     runs, unique, uniqueAll, other,
-    totals: Object.fromEntries(totals.map((r) => [String(r.host), { all: Number(r.n), since: String(r.since) }])),
+    totals: Object.fromEntries(totals.map((r) => [String(r.script), { all: Number(r.n), since: String(r.since) }])),
     countries: countries.map((r) => ({ country: String(r.country || ''), n: Number(r.n) })),
     agents: Object.fromEntries(agents.map((r) => [String(r.agent), Number(r.n)])),
     pulls: pullRows,
@@ -320,23 +394,28 @@ async function stats(env: Env, days: number) {
 
 // A public number for a README badge (shields.io's endpoint format): a
 // project's runs, all its scripts as one — which script, where from, how many
-// servers stay on the stats page. /badge/snell.json?period=today|7d|30d|all&label=…
-async function badge(env: Env, key: string, q: URLSearchParams): Promise<Response> {
-  const name = projectNamed(env, key)
-  if (!name) return json({ error: 'no such project' }, 404)
-  const hosts = projects(env).get(name)!
+// servers stay on the stats page. /badge/snell.json?period=today|7d|30d|all&label=…&lang=en|zh
+const BADGE_LABELS: Record<string, Record<string, string>> = {
+  en: { today: 'runs today', '7d': 'runs (7 days)', '30d': 'runs (30 days)', all: 'runs' },
+  zh: { today: '今日运行', '7d': '近 7 天运行', '30d': '近 30 天运行', all: '累计运行' },
+}
+
+async function badge(env: Env, cfg: Config, key: string, q: URLSearchParams): Promise<Response> {
+  const name = projectNamed(cfg, key)
+  if (!name) return json({ error: 'not_found' }, 404)
+  const names = projects(cfg).get(name)!
   await ensureSchema(env.DB)
   const period = ['today', '7d', '30d', 'all'].includes(q.get('period') ?? '') ? q.get('period')! : 'all'
-  const today = dayOf(env)
+  const today = dayOf(cfg)
   const from = period === 'today' ? today : period === '7d' ? addDays(today, -6) : period === '30d' ? addDays(today, -29) : '0000-00-00'
   const row = await env.DB.prepare(
-    `SELECT COALESCE(SUM(n), 0) AS n FROM hits WHERE day >= ? AND agent != 'other' AND host IN (${marks(hosts.length)})`)
-    .bind(from, ...hosts).first<{ n: number }>()
+    `SELECT COALESCE(SUM(n), 0) AS n FROM hits WHERE day >= ? AND agent != 'other' AND script IN (${marks(names.length)})`)
+    .bind(from, ...names).first<{ n: number }>()
   const n = row?.n ?? 0
   const short = n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1e4 ? `${+(n / 1e3).toFixed(1)}k` : String(n)
-  const labels: Record<string, string> = { today: '今日', '7d': '近 7 天', '30d': '近 30 天', all: '累计' }
+  const labels = BADGE_LABELS[q.get('lang') === 'zh' ? 'zh' : 'en']
   return json({
-    schemaVersion: 1, label: q.get('label')?.slice(0, 40) || `${labels[period]}运行`,
+    schemaVersion: 1, label: q.get('label')?.slice(0, 40) || labels[period],
     message: short, color: '2a78d6', cacheSeconds: 1800,
   }, 200, { 'Cache-Control': 'public, max-age=1800', 'Access-Control-Allow-Origin': '*' })
 }
@@ -346,7 +425,7 @@ const PAGE_HEADERS = {
   'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
 }
 
-async function statsPage(req: Request, env: Env): Promise<Response> {
+async function statsPage(req: Request, env: Env, cfg: Config): Promise<Response> {
   const url = new URL(req.url)
   const p = url.pathname
   if (p === '/' && req.method === 'GET') return new Response(PAGE_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', ...PAGE_HEADERS } })
@@ -356,30 +435,50 @@ async function statsPage(req: Request, env: Env): Promise<Response> {
   if (p === '/api/logout' && req.method === 'POST') {
     return json({ ok: true }, 200, { 'Set-Cookie': 'st=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict' })
   }
-  if (p === '/api/stats' && req.method === 'GET') {
-    if (!configured(env)) return json({ error: '先设置 ADMIN_PASSWORD（至少 8 位）', configured: false }, 503)
-    if (!(await signedIn(req, env))) return json({ error: '请先登录' }, 401)
-    const days = Math.min(Math.max(Math.floor(Number(url.searchParams.get('days'))) || 30, 7), MAX_DAYS)
-    return json(await stats(env, days))
+  if (p === '/api/stats' || p === '/api/config') {
+    if (!configured(env)) return json({ error: 'no_password' }, 503)
+    if (!(await signedIn(req, env))) return json({ error: 'signin' }, 401)
+    if (p === '/api/stats' && req.method === 'GET') {
+      const days = Math.min(Math.max(Math.floor(Number(url.searchParams.get('days'))) || 30, 7), MAX_DAYS)
+      return json(await stats(env, await config(env, true), days))
+    }
+    // the stats page's own host: the scripts' paths hang off it, and no script may take it
+    if (p === '/api/config' && req.method === 'GET') return json({ ...(await config(env, true)), host: hostOf(req) })
+    if (p === '/api/config' && req.method === 'PUT') {
+      if (!sameOrigin(req)) return json({ error: 'forbidden' }, 403)
+      const body = await req.json().catch(() => null)
+      const r = checked(body, hostOf(req))
+      if ('problem' in r) return json(r.problem, 400)
+      await saveConfig(env, r.cfg)
+      return json({ ok: true, ...r.cfg, host: hostOf(req) })
+    }
   }
   const b = /^\/badge\/([a-z0-9.-]{1,80})\.json$/.exec(p)
-  if (b && req.method === 'GET') return badge(env, b[1], url.searchParams)
-  return json({ error: 'not found' }, 404)
+  if (b && req.method === 'GET') return badge(env, cfg, b[1], url.searchParams)
+  return json({ error: 'not_found' }, 404)
 }
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const host = hostOf(req)
-    const target = targets(env).get(host)
-    if (target) return serveScript(req, env, ctx, host, target)
     try {
-      return await statsPage(req, env)
+      const cfg = await config(env)
+      const host = hostOf(req)
+      const path = new URL(req.url).pathname
+      // a script's own hostname: "/" is the script; anything else (a favicon,
+      // a crawler's guess) goes to it as well, uncounted
+      const onHost = cfg.scripts.find((s) => s.hosts.includes(host))
+      if (onHost) return serveScript(req, env, ctx, cfg, onHost, path === '/')
+      // https://<this host>/<name>
+      const m = /^\/([a-z0-9][a-z0-9._-]{0,63})$/i.exec(path)
+      const named = m && !RESERVED.has(m[1].toLowerCase()) ? cfg.scripts.find((s) => s.name === m[1].toLowerCase()) : undefined
+      if (named) return serveScript(req, env, ctx, cfg, named, true)
+      return await statsPage(req, env, cfg)
     } catch (e) {
       console.error(e)
-      return json({ error: 'internal error' }, 500)
+      return json({ error: 'internal' }, 500)
     }
   },
   scheduled(_c: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(daily(env).catch((e) => console.error('daily', e)))
+    ctx.waitUntil(hourly(env).catch((e) => console.error('hourly', e)))
   },
 } satisfies ExportedHandler<Env>

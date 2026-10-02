@@ -1,0 +1,3 @@
+# The password of the stats page (8+ characters). The Deploy to Cloudflare
+# form asks for it; for `wrangler dev`, copy this file to .dev.vars.
+ADMIN_PASSWORD=
