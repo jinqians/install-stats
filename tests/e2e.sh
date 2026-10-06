@@ -196,6 +196,21 @@ chk "… a label of one's own; proxy-stack: 0; a project named in the settings (
 chk "no badge for one script, nor for servers: those stay on the stats page" bash -c \
     "for b in menu snell.jinqians.com nope; do [[ \$(docker exec $K curl -s -o /dev/null -w '%{http_code}' $B/badge/\$b.json) == 404 ]] || exit 1; done; docker exec $K curl -s '$B/badge/snell.json?period=today&kind=unique' | jq -e '.message == \"7\"'"
 
+sec "the chart for a README: a project's runs per day, all its scripts as one"
+CH="$B/chart"
+docker exec "$K" curl -s -D /tmp/ch -o /tmp/chart.svg "$CH/snell.svg"; docker cp "$K":/tmp/chart.svg "$T/chart.svg" >/dev/null; docker cp "$K":/tmp/ch "$T/chart.h" >/dev/null
+chk "an SVG (well-formed), cached an hour, readable from anywhere" bash -c \
+    "grep -qi '^content-type: image/svg+xml' $T/chart.h && grep -qi '^cache-control: public, max-age=3600' $T/chart.h && grep -qi '^access-control-allow-origin: \\*' $T/chart.h && python3 -c 'import sys, xml.dom.minidom; xml.dom.minidom.parse(sys.argv[1])' $T/chart.svg"
+chk "… 30 days; snell.sh today 7 (snell and menu as one), yesterday 4, 11 in all" bash -c \
+    "grep -q 'daily runs, last 30 days' $T/chart.svg && grep -q '>11 runs<' $T/chart.svg && grep -q '<title>$TODAY: 7</title>' $T/chart.svg && grep -q '<title>$YDAY: 4</title>' $T/chart.svg && [[ \$(grep -o '<rect ' $T/chart.svg | wc -l) == 2 ]]"
+chk "… no script by name, nothing but the project's runs" bash -c "! grep -qE 'menu|snell-centos|install' $T/chart.svg"
+chk "… in Chinese, dark, over 7 days" bash -c \
+    "docker exec $K curl -s '$CH/snell.sh.svg?lang=zh&theme=dark&days=7' > $T/chart-zh.svg && grep -q '近 7 天每日运行' $T/chart-zh.svg && grep -q '共 11 次' $T/chart-zh.svg && grep -q '#3987e5' $T/chart-zh.svg && grep -q '>今日<' $T/chart-zh.svg"
+chk "… a project with no runs: an empty chart (proxy-stack); no chart for one script or no project (404)" bash -c \
+    "docker exec $K curl -s '$CH/proxy-stack.svg' | grep -q '>0 runs<' && for c in menu nope; do [[ \$(docker exec $K curl -s -o /dev/null -w '%{http_code}' $CH/\$c.svg) == 404 ]] || exit 1; done"
+chk "a script cannot be named chart (the page's own path)" bash -c \
+    "jq '.scripts[0].name = \"chart\"' $T/conf.json > $T/bad.json && $(declare -f put code body); K=$K B=$B COOKIE='$COOKIE'; [[ \$(put $T/bad.json) == 400 ]] && body | jq -e '.field == \"reserved\"'"
+
 sec "the page, in a browser (Playwright)"
 docker run -d --name "$U" --network "container:$K" -v "$N/tests:/tests:ro" -v "$T:/out" -w /ui node:22 sleep infinity >/dev/null
 chk "Playwright + Chromium" docker exec "$U" sh -c 'npm init -y >/dev/null && npm install --no-audit --no-fund playwright >/dev/null 2>&1 && npx playwright install --with-deps chromium >/dev/null 2>&1'

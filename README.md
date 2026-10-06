@@ -89,6 +89,19 @@ npx wrangler secret put ADMIN_PASSWORD
 
 参数：`period=today|7d|30d|all`（默认 `all`）、`lang=en|zh`（标签的语言，默认英文）、`label=自定义标签`。只给项目的运行次数；单个脚本、服务器数、国家这些只在统计页里。
 
+## 图表
+
+`https://stats.example.com/chart/<项目>.svg` 是一张近 30 天每日运行次数的柱状图（SVG），和徽章一样只给项目的合计，背景透明，可以直接放进 README。用 `<picture>` 让它跟随 GitHub 的浅色 / 深色主题：
+
+```html
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://stats.example.com/chart/tool.svg?theme=dark&lang=zh">
+  <img alt="每日运行" src="https://stats.example.com/chart/tool.svg?lang=zh">
+</picture>
+```
+
+参数：`days=7..90`（默认 30）、`theme=light|dark`（默认 light）、`lang=en|zh`（默认英文）。今天的柱子颜色浅一些（今天还没过完）。图片缓存一小时，GitHub 上看到的最多晚一小时左右。
+
 ## 额度
 
 免费版 Workers 每天 10 万次请求；每次运行写 D1 两行（运行次数、去重），D1 免费版每天 10 万行写入，约合每天 5 万次运行。定时任务每小时跑一次（按所选时区结算前一天），几乎不占额度。

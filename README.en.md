@@ -89,6 +89,19 @@ Two ways in, which can be mixed:
 
 Parameters: `period=today|7d|30d|all` (default `all`), `lang=en|zh` (the label's language, English by default), `label=your own label`. Only a project's runs; single scripts, servers and countries stay on the stats page.
 
+## Chart
+
+`https://stats.example.com/chart/<project>.svg` is a bar chart (SVG) of a project's runs per day over the last 30 days: like the badges, the project's total only, on a clear background, ready for a README. `<picture>` makes it follow GitHub's light or dark theme:
+
+```html
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://stats.example.com/chart/tool.svg?theme=dark">
+  <img alt="Daily runs" src="https://stats.example.com/chart/tool.svg">
+</picture>
+```
+
+Parameters: `days=7..90` (30 by default), `theme=light|dark` (light by default), `lang=en|zh` (English by default). Today's bar is lighter (the day is not over). The image is cached for an hour, so GitHub shows it up to about an hour late.
+
 ## Limits
 
 The free Workers plan allows 100,000 requests a day; a run writes two D1 rows (the run, the unique server), and free D1 allows 100,000 written rows a day: about 50,000 runs a day. The scheduled job runs hourly (closing the day before in the time zone you picked) and costs next to nothing.

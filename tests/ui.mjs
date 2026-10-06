@@ -205,6 +205,16 @@ await step('signing out: back to the form, and the stats closed again', async ()
   await page.waitForSelector(sel('login'))
 })
 
+await step('the README chart renders, light and dark', async () => {
+  for (const theme of ['light', 'dark']) {
+    const r = await page.goto(`${base}/chart/snell.svg?theme=${theme}&lang=zh`)
+    if (r.status() !== 200 || !r.headers()['content-type'].startsWith('image/svg+xml')) throw new Error(`${theme}: ${r.status()}`)
+    if (theme === 'dark') await page.emulateMedia({ colorScheme: 'dark' })
+    await page.screenshot({ path: `${out}/chart-${theme}.png` })
+  }
+  await page.emulateMedia({ colorScheme: 'light' })
+})
+
 await step('no script error, no CSP violation', async () => {
   if (errors.length) throw new Error(errors.join(' | '))
 })

@@ -38,7 +38,7 @@ const MAX_REPOS = 20
 // stats page is seen by the isolate that made it at once, by others after this)
 const CONFIG_TTL_MS = 30_000
 // the stats page's own paths: no script is named so
-const RESERVED = new Set(['api', 'badge', 'app.js', 'app.css', 'favicon.ico', 'robots.txt'])
+const RESERVED = new Set(['api', 'badge', 'chart', 'app.js', 'app.css', 'favicon.ico', 'robots.txt'])
 const NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/
 const HOST = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
 const PROJECT = /^[\w.-]{1,64}$/
@@ -420,6 +420,77 @@ async function badge(env: Env, cfg: Config, key: string, q: URLSearchParams): Pr
   }, 200, { 'Cache-Control': 'public, max-age=1800', 'Access-Control-Allow-Origin': '*' })
 }
 
+// A public chart for a README: a project's runs per day, all its scripts as
+// one (as little as the badges give, day by day), the last 30 days by default.
+// /chart/snell.svg?days=7..90&theme=light|dark&lang=en|zh — a README picks the
+// theme with <picture> and prefers-color-scheme; the background is clear.
+const CHART_THEMES: Record<string, { text: string; muted: string; grid: string; bar: string; today: string }> = {
+  light: { text: '#1f2328', muted: '#59636e', grid: '#d1d9e0', bar: '#2a78d6', today: '#9fc2ef' },
+  dark: { text: '#f0f6fc', muted: '#9198a1', grid: '#3d444d', bar: '#3987e5', today: '#24507f' },
+}
+const CHART_TEXT: Record<string, { title: (n: number) => string; total: (n: string) => string; today: string; summary: (p: string, n: number, t: string) => string }> = {
+  en: { title: (n) => `daily runs, last ${n} days`, total: (n) => `${n} runs`, today: 'today',
+        summary: (p, n, t) => `${p}: ${t} runs in the last ${n} days, by day` },
+  zh: { title: (n) => `近 ${n} 天每日运行`, total: (n) => `共 ${n} 次`, today: '今日',
+        summary: (p, n, t) => `${p}：近 ${n} 天每日运行，共 ${t} 次` },
+}
+const xml = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[c]!)
+
+async function chart(env: Env, cfg: Config, key: string, q: URLSearchParams): Promise<Response> {
+  const name = projectNamed(cfg, key)
+  if (!name) return json({ error: 'not_found' }, 404)
+  const names = projects(cfg).get(name)!
+  await ensureSchema(env.DB)
+  const n = Math.min(Math.max(Math.floor(Number(q.get('days'))) || 30, 7), 90)
+  const theme = CHART_THEMES[q.get('theme') === 'dark' ? 'dark' : 'light']
+  const text = CHART_TEXT[q.get('lang') === 'zh' ? 'zh' : 'en']
+  const today = dayOf(cfg)
+  const days = Array.from({ length: n }, (_, i) => addDays(today, i - n + 1))
+  const rows = (await env.DB.prepare(
+    `SELECT day, SUM(n) AS n FROM hits WHERE day >= ? AND agent != 'other' AND script IN (${marks(names.length)}) GROUP BY day`)
+    .bind(days[0], ...names).all<{ day: string; n: number }>()).results
+  const byDay = new Map(rows.map((r) => [r.day, Number(r.n)]))
+  const values = days.map((d) => byDay.get(d) ?? 0)
+  const total = values.reduce((a, b) => a + b, 0)
+  const fmt = (v: number) => v.toLocaleString('en-US')
+
+  // about four steps of 1, 2 or 5 × 10ⁿ, as on the stats page
+  const top = Math.max(1, ...values)
+  const raw = Math.max(1, top / 4), pow = Math.pow(10, Math.floor(Math.log10(raw))), m = raw / pow
+  const step = Math.max(1, (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * pow)
+  const max = Math.max(step, Math.ceil(top / step) * step)
+  const W = 720, H = 220, L = 46, R = 10, T = 40, B = 26
+  const cw = (W - L - R) / n, bw = Math.max(2, cw * 0.68)
+  const y = (v: number) => T + (H - T - B) * (1 - v / max)
+  const font = `font-family="system-ui,-apple-system,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif"`
+  const summary = text.summary(name, n, fmt(total))
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${xml(summary)}" ${font}>`
+    + `<title>${xml(summary)}</title>`
+    + `<text x="${L}" y="20" font-size="14" font-weight="600" fill="${theme.text}">${xml(name)} · ${xml(text.title(n))}</text>`
+    + `<text x="${W - R}" y="20" font-size="13" text-anchor="end" fill="${theme.muted}">${xml(text.total(fmt(total)))}</text>`
+  for (let v = 0; v <= max; v += step) {
+    svg += `<line x1="${L}" x2="${W - R}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" stroke="${theme.grid}" stroke-width="1"/>`
+      + `<text x="${L - 6}" y="${(y(v) + 4).toFixed(1)}" font-size="11" text-anchor="end" fill="${theme.muted}">${fmt(v)}</text>`
+  }
+  // a label every ~5 days, counted back from today, which is named (its bar is lighter: the day is not over)
+  const every = Math.max(1, Math.round(n / 6))
+  values.forEach((v, i) => {
+    const x = L + cw * i + cw / 2
+    if (v > 0) svg += `<rect x="${(x - bw / 2).toFixed(1)}" y="${y(v).toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1, y(0) - y(v)).toFixed(1)}" rx="1.5" fill="${i === n - 1 ? theme.today : theme.bar}"><title>${days[i]}: ${fmt(v)}</title></rect>`
+    if ((n - 1 - i) % every === 0) {
+      svg += `<text x="${x.toFixed(1)}" y="${H - 8}" font-size="11" text-anchor="middle" fill="${theme.muted}">${i === n - 1 ? xml(text.today) : days[i].slice(5).replace('-', '/')}</text>`
+    }
+  })
+  svg += '</svg>'
+  return new Response(svg, {
+    headers: {
+      'Content-Type': 'image/svg+xml; charset=utf-8', 'Cache-Control': 'public, max-age=3600',
+      'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'", 'Access-Control-Allow-Origin': '*',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  })
+}
+
 const PAGE_HEADERS = {
   ...SECURITY_HEADERS,
   'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
@@ -455,6 +526,8 @@ async function statsPage(req: Request, env: Env, cfg: Config): Promise<Response>
   }
   const b = /^\/badge\/([a-z0-9.-]{1,80})\.json$/.exec(p)
   if (b && req.method === 'GET') return badge(env, cfg, b[1], url.searchParams)
+  const c = /^\/chart\/([a-z0-9.-]{1,80})\.svg$/.exec(p)
+  if (c && req.method === 'GET') return chart(env, cfg, c[1], url.searchParams)
   return json({ error: 'not_found' }, 404)
 }
 
