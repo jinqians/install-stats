@@ -134,6 +134,7 @@ const TEXT = {
     tipRuns: (n) => n + ' 次', tipServers: (n) => n + ' 台', tipOwn: (n) => '（各脚本合计 ' + n + '）', none: '没有',
     empty: '还没有要统计的脚本。', toSettings: '去设置',
     scripts: '脚本', colName: '名字', colUrl: '脚本地址', colProject: '项目', colHosts: '独立域名（可选）',
+    phName: '如 tool', phUrl: '如 https://raw.githubusercontent.com/you/tool/main/install.sh', phHosts: '可选，如 tool.example.com',
     phProject: '默认：GitHub 仓库名', entry: '入口：', remove: '删除', add: '添加脚本',
     repos: 'Docker Hub 仓库', reposHelp: '每行一个，写成 owner/name；每天记一次拉取数。',
     zone: '时区', zoneHelp: '按这个时区计算「一天」。', save: '保存', saved: '已保存', unsaved: '有未保存的修改',
@@ -164,6 +165,7 @@ const TEXT = {
     tipRuns: (n) => n + ' runs', tipServers: (n) => n + ' servers', tipOwn: (n) => ' (the scripts’ own: ' + n + ')', none: 'none',
     empty: 'No scripts to count yet.', toSettings: 'Go to the settings',
     scripts: 'Scripts', colName: 'Name', colUrl: 'Script URL', colProject: 'Project', colHosts: 'Own hostnames (optional)',
+    phName: 'e.g. tool', phUrl: 'e.g. https://raw.githubusercontent.com/you/tool/main/install.sh', phHosts: 'Optional, e.g. tool.example.com',
     phProject: 'Default: its GitHub repository', entry: 'Entry: ', remove: 'Remove', add: 'Add a script',
     repos: 'Docker Hub repositories', reposHelp: 'One per line, as owner/name; the pull count is read once a day.',
     zone: 'Time zone', zoneHelp: 'A day is counted in this time zone.', save: 'Save', saved: 'Saved', unsaved: 'Unsaved changes',
@@ -433,10 +435,10 @@ function entryOf(name) {
 
 function scriptRow(sc, i) {
   return '<div class="srow" data-test="srow-' + i + '">' +
-    '<input class="input" data-i="' + i + '" data-k="name" data-test="name-' + i + '" placeholder="snell" value="' + esc(sc.name) + '" aria-label="' + T('colName') + '">' +
-    '<input class="input" data-i="' + i + '" data-k="url" data-test="url-' + i + '" placeholder="https://raw.githubusercontent.com/you/repo/main/install.sh" value="' + esc(sc.url) + '" aria-label="' + T('colUrl') + '">' +
+    '<input class="input" data-i="' + i + '" data-k="name" data-test="name-' + i + '" placeholder="' + T('phName') + '" value="' + esc(sc.name) + '" aria-label="' + T('colName') + '">' +
+    '<input class="input" data-i="' + i + '" data-k="url" data-test="url-' + i + '" placeholder="' + T('phUrl') + '" value="' + esc(sc.url) + '" aria-label="' + T('colUrl') + '">' +
     '<input class="input" data-i="' + i + '" data-k="project" data-test="project-' + i + '" placeholder="' + T('phProject') + '" value="' + esc(sc.project) + '" aria-label="' + T('colProject') + '">' +
-    '<input class="input" data-i="' + i + '" data-k="hosts" data-test="hosts-' + i + '" placeholder="install.example.com" value="' + esc(sc.hosts) + '" aria-label="' + T('colHosts') + '">' +
+    '<input class="input" data-i="' + i + '" data-k="hosts" data-test="hosts-' + i + '" placeholder="' + T('phHosts') + '" value="' + esc(sc.hosts) + '" aria-label="' + T('colHosts') + '">' +
     '<button class="btn danger" type="button" data-remove="' + i + '" data-test="remove-' + i + '">' + T('remove') + '</button>' +
     '<div class="small muted entry" id="entry-' + i + '">' + entryOf(sc.name) + '</div></div>'
 }

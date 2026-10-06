@@ -113,6 +113,9 @@ await step('the settings: the nine scripts, each with its entry on this page\'s 
   if ((await page.inputValue(sel('name-1'))) !== 'snell' || (await page.inputValue(sel('hosts-1'))) !== 'snell.jinqians.com') throw new Error('row 1')
   const entry = await page.textContent('#entry-1')
   if (!entry.includes(`${new URL(base).host}/snell`)) throw new Error(entry)
+  // an empty field says what goes there and that it may stay empty: no example that reads like a value
+  const ph = await page.getAttribute(sel('hosts-2'), 'placeholder')
+  if ((await page.inputValue(sel('hosts-2'))) !== '' || !ph.startsWith('可选')) throw new Error(`hosts-2 placeholder: ${ph}`)
   if ((await page.inputValue(sel('timezone'))) !== 'Asia/Shanghai') throw new Error(await page.inputValue(sel('timezone')))
   if (!(await page.inputValue(sel('repos'))).includes('jinqians/snell-server')) throw new Error('repos')
   await page.screenshot({ path: `${out}/settings.png`, fullPage: true })
@@ -156,6 +159,8 @@ await step('… removed again, and the export is that configuration as JSON', as
 await step('English: the button switches, and it stays so after a reload', async () => {
   await page.click(sel('lang'))
   await page.waitForFunction((s) => document.querySelector(s)?.textContent === 'Save', sel('save'))
+  const ph = await page.getAttribute(sel('hosts-2'), 'placeholder')
+  if (!ph.startsWith('Optional')) throw new Error(`hosts-2 placeholder: ${ph}`)
   if ((await page.title()) !== 'Install stats') throw new Error(await page.title())
   await page.click(sel('tab-stats'))
   await page.waitForSelector(sel('kpi-today'))
